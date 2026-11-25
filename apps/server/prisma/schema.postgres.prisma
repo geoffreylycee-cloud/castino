@@ -1,0 +1,220 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ItemRarity {
+  COMMON
+  UNCOMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+enum InventoryStatus {
+  IN_INVENTORY
+  SOLD
+}
+
+enum GameType {
+  CASE_OPENING
+  CRASH
+  MINES
+  DICE
+  BLACKJACK
+  PLINKO
+  LIMBO
+  ROULETTE
+  KENO
+  HILO
+  UPGRADER
+  CASE_BATTLE
+}
+
+enum BetStatus {
+  ACTIVE
+  WON
+  LOST
+}
+
+enum CrashRoundStatus {
+  WAITING
+  RUNNING
+  CRASHED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String?
+  role         UserRole  @default(USER)
+  isGuest      Boolean   @default(false)
+  isBanned     Boolean   @default(false)
+  avatarSeed   String    @default("cyber")
+
+  balance      Int       @default(100000)
+  totalWagered Int       @default(0)
+  totalWon     Int       @default(0)
+  lastFaucetAt DateTime?
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  seeds        FairnessSeed[]
+  inventory    InventoryItem[]
+  bets         BetHistory[]
+  messages     ChatMessage[]
+}
+
+model FairnessSeed {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  serverSeed     String
+  serverSeedHash String
+  clientSeed     String
+  nonce          Int       @default(0)
+  isActive       Boolean   @default(true)
+
+  createdAt      DateTime  @default(now())
+  revealedAt     DateTime?
+
+  bets           BetHistory[]
+
+  @@index([userId, isActive])
+}
+
+model Item {
+  id               String     @id @default(cuid())
+  name             String
+  slug             String     @unique
+  weaponOrCategory String?
+  imageUrl         String
+  rarity           ItemRarity
+  value            Int
+
+  createdAt        DateTime   @default(now())
+
+  caseItems        CaseItem[]
+  inventoryItems   InventoryItem[]
+}
+
+model Case {
+  id             String          @id @default(cuid())
+  name           String
+  slug           String          @unique
+  description    String?
+  imageUrl       String
+  price          Int
+  category       String          @default("featured")
+  sortOrder      Int             @default(0)
+  isActive       Boolean         @default(true)
+
+  createdAt      DateTime        @default(now())
+
+  items          CaseItem[]
+  inventoryDrops InventoryItem[]
+}
+
+model CaseItem {
+  id          String @id @default(cuid())
+  caseId      String
+  case        Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item   @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  weight      Int
+  ticketStart Int
+  ticketEnd   Int
+
+  @@unique([caseId, itemId])
+  @@index([caseId])
+}
+
+model InventoryItem {
+  id            String          @id @default(cuid())
+  userId        String
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId        String
+  item          Item            @relation(fields: [itemId], references: [id])
+  originCaseId  String?
+  originCase    Case?           @relation(fields: [originCaseId], references: [id], onDelete: SetNull)
+  betHistoryId  String?         @unique
+  betHistory    BetHistory?     @relation(fields: [betHistoryId], references: [id], onDelete: SetNull)
+
+  status        InventoryStatus @default(IN_INVENTORY)
+  acquiredValue Int
+  soldValue     Int?
+  acquiredAt    DateTime        @default(now())
+  soldAt        DateTime?
+
+  @@index([userId, status])
+}
+
+model BetHistory {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  gameType       GameType
+  status         BetStatus     @default(WON)
+
+  wager          Int
+  multiplier     Float         @default(0)
+  payout         Int           @default(0)
+  profit         Int           @default(0)
+
+  fairnessSeedId String?
+  fairnessSeed   FairnessSeed? @relation(fields: [fairnessSeedId], references: [id], onDelete: SetNull)
+  nonceUsed      Int?
+
+  crashRoundId   String?
+  crashRound     CrashRound?   @relation(fields: [crashRoundId], references: [id], onDelete: SetNull)
+
+  gameData       String        @default("{}")
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  inventoryDrop  InventoryItem?
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([gameType, createdAt(sort: Desc)])
+}
+
+model CrashRound {
+  id             String           @id @default(cuid())
+  roundNumber    Int              @unique
+  status         CrashRoundStatus @default(WAITING)
+
+  crashPoint     Float
+  serverSeed     String
+  serverSeedHash String
+  publicSeed     String
+
+  startedAt      DateTime?
+  crashedAt      DateTime?
+  createdAt      DateTime         @default(now())
+
+  bets           BetHistory[]
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  text      String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}

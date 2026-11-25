@@ -1,0 +1,23 @@
+{
+  "name": "castino",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CaSTIno - Plateforme Casino Virtuel & Case Opening Temps Réel (Stake x Hellcase)",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n SERVER,WEB -c cyan,green \"npm run dev --workspace=@castino/server\" \"npm run dev --workspace=@castino/web\"",
+    "build": "npm run build --workspace=@castino/shared && npm run build --workspace=@castino/web && npm run build --workspace=@castino/server",
+    "build:cloud": "npm run build --workspace=@castino/shared && npm run build --workspace=@castino/web && npm run build:cloud --workspace=@castino/server",
+    "start": "npm run start --workspace=@castino/server",
+    "db:push": "npm run db:push --workspace=@castino/server",
+    "db:seed": "npm run db:seed --workspace=@castino/server",
+    "setup": "npm run build --workspace=@castino/shared && npm run db:push && npm run db:seed"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}
