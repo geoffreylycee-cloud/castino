@@ -3,7 +3,7 @@ services:
     name: castino-multiplayer
     runtime: node
     plan: free
-    buildCommand: npm install && npm run build:cloud
+    buildCommand: npm install --include=dev && npm run build:cloud
     startCommand: npm run start
     envVars:
       - key: NODE_ENV
