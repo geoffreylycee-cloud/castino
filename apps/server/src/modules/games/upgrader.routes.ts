@@ -41,6 +41,18 @@ function mapItem(item: {
 
 export const upgraderRouter = Router();
 
+let cachedTargetItems: ItemDTO[] | null = null;
+
+async function getTargetItemsCatalog(): Promise<ItemDTO[]> {
+  if (cachedTargetItems) return cachedTargetItems;
+  const rows = await prisma.item.findMany({
+    where: { caseItems: { some: { case: { isActive: true } } } },
+    orderBy: { value: 'asc' },
+  });
+  cachedTargetItems = rows.map(mapItem);
+  return cachedTargetItems;
+}
+
 // Liste des skins cibles disponibles parmi les 24 caisses CS2 actives
 upgraderRouter.get('/targets', async (req, res) => {
   try {
@@ -52,35 +64,27 @@ upgraderRouter.get('/targets', async (req, res) => {
     const limit = Math.min(80, Math.max(10, parseInt(String(req.query.limit || '48'), 10)));
     const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10));
 
-    const where: Record<string, unknown> = {
-      caseItems: { some: { case: { isActive: true } } },
-    };
+    const all = await getTargetItemsCatalog();
 
-    if (rarity !== 'ALL' && ['COMMON', 'UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY'].includes(rarity)) {
-      where.rarity = rarity;
-    }
-
-    if (minPrice > 0 || maxPrice > 0) {
-      const valueFilter: Record<string, number> = {};
-      if (minPrice > 0) valueFilter.gte = minPrice;
-      if (maxPrice > 0) valueFilter.lte = maxPrice;
-      where.value = valueFilter;
-    }
-
-    const allMatching = await prisma.item.findMany({
-      where,
-      orderBy: { value: sort },
+    let filtered = all.filter((it) => {
+      if (rarity !== 'ALL' && it.rarity !== rarity) return false;
+      if (minPrice > 0 && it.value < minPrice) return false;
+      if (maxPrice > 0 && it.value > maxPrice) return false;
+      if (
+        search &&
+        !it.name.toLowerCase().includes(search) &&
+        !(it.weaponOrCategory || '').toLowerCase().includes(search)
+      ) {
+        return false;
+      }
+      return true;
     });
 
-    const filtered = search
-      ? allMatching.filter(
-          (it) =>
-            it.name.toLowerCase().includes(search) ||
-            (it.weaponOrCategory || '').toLowerCase().includes(search)
-        )
-      : allMatching;
+    if (sort === 'desc') {
+      filtered = [...filtered].reverse();
+    }
 
-    const page = filtered.slice(offset, offset + limit).map(mapItem);
+    const page = filtered.slice(offset, offset + limit);
     res.json({
       items: page,
       total: filtered.length,

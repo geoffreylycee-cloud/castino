@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { ECONOMY, rollLimboMultiplier, type LimboBetResponse } from '@castino/shared';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth } from '../../middlewares/auth.js';
-import { consumeFairnessNonce } from '../fairness/fairness.service.js';
+import { ensureActiveSeed } from '../fairness/fairness.service.js';
 import { broadcastFeedEvent, emitBalanceUpdate } from '../../socket/hub.js';
 
 const limboSchema = z.object({
@@ -26,43 +26,51 @@ limboRouter.post('/bet', requireAuth, async (req, res) => {
     const targetMultiplier = Math.round(parsed.data.targetMultiplier * 100) / 100;
 
     const result = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.findUnique({ where: { id: userId } });
+      const [user, seed] = await Promise.all([
+        tx.user.findUnique({ where: { id: userId } }),
+        ensureActiveSeed(tx, userId),
+      ]);
       if (!user) throw new Error('USER_NOT_FOUND');
       if (user.balance < wager) throw new Error('INSUFFICIENT_BALANCE');
 
-      const fairness = await consumeFairnessNonce(tx, userId);
+      const nonceUsed = seed.nonce;
       const resultMultiplier = rollLimboMultiplier(
-        fairness.serverSeed,
-        fairness.clientSeed,
-        fairness.nonceUsed
+        seed.serverSeed,
+        seed.clientSeed,
+        nonceUsed
       );
       const won = resultMultiplier >= targetMultiplier;
       const payout = won ? Math.round(wager * targetMultiplier) : 0;
       const profit = payout - wager;
 
-      const updatedUser = await tx.user.update({
-        where: { id: userId },
-        data: {
-          balance: { increment: profit },
-          totalWagered: { increment: wager },
-          totalWon: { increment: payout },
-        },
-      });
-
-      const bet = await tx.betHistory.create({
-        data: {
-          userId,
-          gameType: 'LIMBO',
-          status: won ? 'WON' : 'LOST',
-          wager,
-          multiplier: won ? targetMultiplier : 0,
-          payout,
-          profit,
-          fairnessSeedId: fairness.seedId,
-          nonceUsed: fairness.nonceUsed,
-          gameData: JSON.stringify({ targetMultiplier, resultMultiplier }),
-        },
-      });
+      const [, updatedUser, bet] = await Promise.all([
+        tx.fairnessSeed.update({
+          where: { id: seed.id },
+          data: { nonce: { increment: 1 } },
+        }),
+        tx.user.update({
+          where: { id: userId },
+          data: {
+            balance: { increment: profit },
+            totalWagered: { increment: wager },
+            totalWon: { increment: payout },
+          },
+        }),
+        tx.betHistory.create({
+          data: {
+            userId,
+            gameType: 'LIMBO',
+            status: won ? 'WON' : 'LOST',
+            wager,
+            multiplier: won ? targetMultiplier : 0,
+            payout,
+            profit,
+            fairnessSeedId: seed.id,
+            nonceUsed,
+            gameData: JSON.stringify({ targetMultiplier, resultMultiplier }),
+          },
+        }),
+      ]);
 
       return {
         betId: bet.id,
@@ -71,7 +79,7 @@ limboRouter.post('/bet', requireAuth, async (req, res) => {
         won,
         payout,
         profit,
-        nonceUsed: fairness.nonceUsed,
+        nonceUsed,
         newBalance: updatedUser.balance,
       };
     });

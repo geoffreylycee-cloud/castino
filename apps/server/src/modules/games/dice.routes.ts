@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { ECONOMY, rollDiceOutcome, type DiceRollResponse } from '@castino/shared';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth } from '../../middlewares/auth.js';
-import { consumeFairnessNonce } from '../fairness/fairness.service.js';
+import { consumeFairnessNonce, ensureActiveSeed } from '../fairness/fairness.service.js';
 import { broadcastFeedEvent, emitBalanceUpdate } from '../../socket/hub.js';
 
 const diceSchema = z.object({
@@ -30,40 +30,48 @@ diceRouter.post('/roll', requireAuth, async (req, res) => {
     const multiplier = Math.floor((99 / winChance) * 10000) / 10000;
 
     const result = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.findUnique({ where: { id: userId } });
+      const [user, seed] = await Promise.all([
+        tx.user.findUnique({ where: { id: userId } }),
+        ensureActiveSeed(tx, userId),
+      ]);
       if (!user) throw new Error('USER_NOT_FOUND');
       if (user.balance < wager) throw new Error('INSUFFICIENT_BALANCE');
 
-      const fairness = await consumeFairnessNonce(tx, userId);
-      const roll = rollDiceOutcome(fairness.serverSeed, fairness.clientSeed, fairness.nonceUsed);
+      const nonceUsed = seed.nonce;
+      const roll = rollDiceOutcome(seed.serverSeed, seed.clientSeed, nonceUsed);
       const won = condition === 'UNDER' ? roll < target : roll > target;
 
       const payout = won ? Math.round(wager * multiplier) : 0;
       const profit = payout - wager;
 
-      const updatedUser = await tx.user.update({
-        where: { id: userId },
-        data: {
-          balance: { increment: profit },
-          totalWagered: { increment: wager },
-          totalWon: { increment: payout },
-        },
-      });
-
-      const bet = await tx.betHistory.create({
-        data: {
-          userId,
-          gameType: 'DICE',
-          status: won ? 'WON' : 'LOST',
-          wager,
-          multiplier: won ? multiplier : 0,
-          payout,
-          profit,
-          fairnessSeedId: fairness.seedId,
-          nonceUsed: fairness.nonceUsed,
-          gameData: JSON.stringify({ target, condition, roll, winChance }),
-        },
-      });
+      const [, updatedUser, bet] = await Promise.all([
+        tx.fairnessSeed.update({
+          where: { id: seed.id },
+          data: { nonce: { increment: 1 } },
+        }),
+        tx.user.update({
+          where: { id: userId },
+          data: {
+            balance: { increment: profit },
+            totalWagered: { increment: wager },
+            totalWon: { increment: payout },
+          },
+        }),
+        tx.betHistory.create({
+          data: {
+            userId,
+            gameType: 'DICE',
+            status: won ? 'WON' : 'LOST',
+            wager,
+            multiplier: won ? multiplier : 0,
+            payout,
+            profit,
+            fairnessSeedId: seed.id,
+            nonceUsed,
+            gameData: JSON.stringify({ target, condition, roll, winChance }),
+          },
+        }),
+      ]);
 
       return {
         username: user.username,
@@ -72,7 +80,7 @@ diceRouter.post('/roll', requireAuth, async (req, res) => {
         won,
         payout,
         profit,
-        nonceUsed: fairness.nonceUsed,
+        nonceUsed,
         newBalance: updatedUser.balance,
       };
     });

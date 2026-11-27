@@ -2,6 +2,7 @@ services:
   - type: web
     name: castino-multiplayer
     runtime: node
+    region: frankfurt
     plan: free
     buildCommand: npm install --include=dev && npm run build:cloud
     startCommand: npm run start

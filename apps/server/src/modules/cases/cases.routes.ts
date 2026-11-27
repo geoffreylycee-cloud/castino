@@ -12,7 +12,7 @@ import {
 } from '@castino/shared';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth } from '../../middlewares/auth.js';
-import { consumeFairnessNonce } from '../fairness/fairness.service.js';
+import { ensureActiveSeed } from '../fairness/fairness.service.js';
 import { broadcastFeedEvent, emitBalanceUpdate } from '../../socket/hub.js';
 
 function mapItemDTO(item: {
@@ -56,37 +56,46 @@ function buildSpinnerReel(caseItems: CaseItemDTO[], wonItem: ItemDTO, winningInd
 
 export const casesRouter = Router();
 
+let cachedCasesCatalog: CaseDTO[] | null = null;
+
+async function getCasesCatalog(): Promise<CaseDTO[]> {
+  if (cachedCasesCatalog) return cachedCasesCatalog;
+
+  const cases = await prisma.case.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      items: {
+        include: { item: true },
+        orderBy: { item: { value: 'asc' } },
+      },
+    },
+  });
+
+  cachedCasesCatalog = cases.map((c) => ({
+    id: c.id,
+    name: c.name,
+    slug: c.slug,
+    description: c.description,
+    imageUrl: c.imageUrl,
+    price: c.price,
+    category: c.category,
+    items: c.items.map((ci) => ({
+      id: ci.id,
+      weight: ci.weight,
+      ticketStart: ci.ticketStart,
+      ticketEnd: ci.ticketEnd,
+      chancePercent: +(ci.weight / 1000).toFixed(3),
+      item: mapItemDTO(ci.item),
+    })),
+  }));
+
+  return cachedCasesCatalog;
+}
+
 casesRouter.get('/', async (_req, res) => {
   try {
-    const cases = await prisma.case.findMany({
-      where: { isActive: true },
-      orderBy: { sortOrder: 'asc' },
-      include: {
-        items: {
-          include: { item: true },
-          orderBy: { item: { value: 'asc' } },
-        },
-      },
-    });
-
-    const payload: CaseDTO[] = cases.map((c) => ({
-      id: c.id,
-      name: c.name,
-      slug: c.slug,
-      description: c.description,
-      imageUrl: c.imageUrl,
-      price: c.price,
-      category: c.category,
-      items: c.items.map((ci) => ({
-        id: ci.id,
-        weight: ci.weight,
-        ticketStart: ci.ticketStart,
-        ticketEnd: ci.ticketEnd,
-        chancePercent: +(ci.weight / 1000).toFixed(3),
-        item: mapItemDTO(ci.item),
-      })),
-    }));
-
+    const payload = await getCasesCatalog();
     res.json({ cases: payload });
   } catch (err) {
     console.error('Get cases error:', err);
@@ -96,39 +105,12 @@ casesRouter.get('/', async (_req, res) => {
 
 casesRouter.get('/:slug', async (req, res) => {
   try {
-    const c = await prisma.case.findUnique({
-      where: { slug: req.params.slug },
-      include: {
-        items: {
-          include: { item: true },
-          orderBy: { item: { value: 'asc' } },
-        },
-      },
-    });
-
-    if (!c || !c.isActive) {
+    const catalog = await getCasesCatalog();
+    const dto = catalog.find((c) => c.slug === req.params.slug);
+    if (!dto) {
       res.status(404).json({ error: 'Caisse introuvable.' });
       return;
     }
-
-    const dto: CaseDTO = {
-      id: c.id,
-      name: c.name,
-      slug: c.slug,
-      description: c.description,
-      imageUrl: c.imageUrl,
-      price: c.price,
-      category: c.category,
-      items: c.items.map((ci) => ({
-        id: ci.id,
-        weight: ci.weight,
-        ticketStart: ci.ticketStart,
-        ticketEnd: ci.ticketEnd,
-        chancePercent: +(ci.weight / 1000).toFixed(3),
-        item: mapItemDTO(ci.item),
-      })),
-    };
-
     res.json({ case: dto });
   } catch (err) {
     console.error('Get case detail error:', err);
@@ -139,23 +121,13 @@ casesRouter.get('/:slug', async (req, res) => {
 // Ouverture gratuite de démonstration (sans débiter ni ajouter à l'inventaire)
 casesRouter.post('/:slug/demo', async (req, res) => {
   try {
-    const c = await prisma.case.findUnique({
-      where: { slug: req.params.slug },
-      include: { items: { include: { item: true } } },
-    });
-    if (!c || c.items.length === 0) {
+    const catalog = await getCasesCatalog();
+    const c = catalog.find((x) => x.slug === req.params.slug);
+    const mappedItems = c?.items || [];
+    if (!c || mappedItems.length === 0) {
       res.status(404).json({ error: 'Caisse introuvable.' });
       return;
     }
-
-    const mappedItems: CaseItemDTO[] = c.items.map((ci) => ({
-      id: ci.id,
-      weight: ci.weight,
-      ticketStart: ci.ticketStart,
-      ticketEnd: ci.ticketEnd,
-      chancePercent: +(ci.weight / 1000).toFixed(3),
-      item: mapItemDTO(ci.item),
-    }));
 
     const rollTicket = crypto.randomInt(0, ECONOMY.CASE_TOTAL_TICKETS);
     const hit = mappedItems.find((ci) => rollTicket >= ci.ticketStart && rollTicket <= ci.ticketEnd) || mappedItems[0];
@@ -180,27 +152,20 @@ casesRouter.post('/:slug/open', requireAuth, async (req, res) => {
   try {
     const userId = req.user!.userId;
     const slug = String(req.params.slug);
-    const c = await prisma.case.findUnique({
-      where: { slug },
-      include: { items: { include: { item: true } } },
-    });
+    const catalog = await getCasesCatalog();
+    const c = catalog.find((x) => x.slug === slug);
+    const mappedItems = c?.items || [];
 
-    if (!c || !c.isActive || c.items.length === 0) {
+    if (!c || mappedItems.length === 0) {
       res.status(404).json({ error: 'Caisse introuvable.' });
       return;
     }
 
-    const mappedItems: CaseItemDTO[] = c.items.map((ci) => ({
-      id: ci.id,
-      weight: ci.weight,
-      ticketStart: ci.ticketStart,
-      ticketEnd: ci.ticketEnd,
-      chancePercent: +(ci.weight / 1000).toFixed(3),
-      item: mapItemDTO(ci.item),
-    }));
-
     const txResult = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.findUnique({ where: { id: userId } });
+      const [user, seed] = await Promise.all([
+        tx.user.findUnique({ where: { id: userId } }),
+        ensureActiveSeed(tx, userId),
+      ]);
       if (!user) {
         throw new Error('USER_NOT_FOUND');
       }
@@ -223,8 +188,8 @@ casesRouter.post('/:slug/open', requireAuth, async (req, res) => {
         }
       }
 
-      const fairness = await consumeFairnessNonce(tx, userId);
-      const rollTicket = rollCaseTicket(fairness.serverSeed, fairness.clientSeed, fairness.nonceUsed);
+      const nonceUsed = seed.nonce;
+      const rollTicket = rollCaseTicket(seed.serverSeed, seed.clientSeed, nonceUsed);
       const hit =
         mappedItems.find((ci) => rollTicket >= ci.ticketStart && rollTicket <= ci.ticketEnd) ||
         mappedItems[0];
@@ -233,36 +198,41 @@ casesRouter.post('/:slug/open', requireAuth, async (req, res) => {
       const multiplier = c.price > 0 ? Math.round((wonItem.value / c.price) * 100) / 100 : 1;
       const profit = wonItem.value - c.price;
 
-      const updatedUser = await tx.user.update({
-        where: { id: userId },
-        data: {
-          balance: { decrement: c.price },
-          totalWagered: { increment: c.price },
-          totalWon: { increment: wonItem.value },
-        },
-      });
-
-      const bet = await tx.betHistory.create({
-        data: {
-          userId,
-          gameType: 'CASE_OPENING',
-          status: wonItem.value >= c.price ? 'WON' : 'LOST',
-          wager: c.price,
-          multiplier,
-          payout: wonItem.value,
-          profit,
-          fairnessSeedId: fairness.seedId,
-          nonceUsed: fairness.nonceUsed,
-          gameData: JSON.stringify({
-            caseId: c.id,
-            caseSlug: c.slug,
-            caseName: c.name,
-            rollTicket,
-            droppedItemId: wonItem.id,
-            droppedItemName: wonItem.name,
-          }),
-        },
-      });
+      const [, updatedUser, bet] = await Promise.all([
+        tx.fairnessSeed.update({
+          where: { id: seed.id },
+          data: { nonce: { increment: 1 } },
+        }),
+        tx.user.update({
+          where: { id: userId },
+          data: {
+            balance: { decrement: c.price },
+            totalWagered: { increment: c.price },
+            totalWon: { increment: wonItem.value },
+          },
+        }),
+        tx.betHistory.create({
+          data: {
+            userId,
+            gameType: 'CASE_OPENING',
+            status: wonItem.value >= c.price ? 'WON' : 'LOST',
+            wager: c.price,
+            multiplier,
+            payout: wonItem.value,
+            profit,
+            fairnessSeedId: seed.id,
+            nonceUsed,
+            gameData: JSON.stringify({
+              caseId: c.id,
+              caseSlug: c.slug,
+              caseName: c.name,
+              rollTicket,
+              droppedItemId: wonItem.id,
+              droppedItemName: wonItem.name,
+            }),
+          },
+        }),
+      ]);
 
       const invItem = await tx.inventoryItem.create({
         data: {
@@ -273,10 +243,6 @@ casesRouter.post('/:slug/open', requireAuth, async (req, res) => {
           status: 'IN_INVENTORY',
           acquiredValue: wonItem.value,
         },
-        include: {
-          item: true,
-          originCase: { select: { id: true, name: true, slug: true } },
-        },
       });
 
       return {
@@ -284,10 +250,15 @@ casesRouter.post('/:slug/open', requireAuth, async (req, res) => {
         newBalance: updatedUser.balance,
         betId: bet.id,
         rollTicket,
-        nonceUsed: fairness.nonceUsed,
+        nonceUsed,
         wonItem,
         multiplier,
-        invItem,
+        invItem: {
+          id: invItem.id,
+          acquiredValue: invItem.acquiredValue,
+          acquiredAt: invItem.acquiredAt,
+          originCase: { id: c.id, name: c.name, slug: c.slug },
+        },
       };
     });
 
